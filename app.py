@@ -29,6 +29,13 @@ CURRENT_TTL = 6 * 3600
 # late-confirmed December data is not locked in for a month.
 YEAR_GRACE_DAYS = 60
 
+# Latvian energy supply security reserve held in Inčukalns. It is not part of
+# the stock that AGSI reports, so the app adds it on top. Each entry is
+# (first gas day it applies from, TWh); add a line if the reserve changes.
+SECURITY_RESERVE = [
+    ("2022-01-01", 1.8),
+]
+
 FIELDS = {  # AGSI field -> column
     "gasInStorage": "stock_twh",        # TWh, end of gas day
     "full": "full_pct",                 # %
@@ -143,10 +150,19 @@ def load_storage(split, today, key):
     return rows, failed
 
 
-def build_daily(rows):
+def reserve_on(days):
+    """Security reserve (TWh) that applies on each gas day (ISO date strings)."""
+    out = pd.Series(0.0, index=days.index)
+    for start, twh in sorted(SECURITY_RESERVE):
+        out[days >= start] = twh
+    return out
+
+
+def build_daily(rows, include_reserve=True):
     cols = ["day", "status"] + list(FIELDS.values())
     if not rows:
-        return pd.DataFrame(columns=cols)
+        return pd.DataFrame(columns=cols + ["agsi_stock_twh", "agsi_full_pct",
+                                            "reserve_twh"])
     df = pd.DataFrame(rows, columns=cols)
     for c in FIELDS.values():
         df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -155,6 +171,14 @@ def build_daily(rows):
     # Fill level: use AGSI's value, calculate it where only stock and capacity exist.
     calc = df["stock_twh"] / df["wgv_twh"] * 100
     df["full_pct"] = df["full_pct"].fillna(calc.where(df["wgv_twh"] > 0))
+    # Keep the figures as AGSI reports them, then add the security reserve.
+    df["agsi_stock_twh"] = df["stock_twh"]
+    df["agsi_full_pct"] = df["full_pct"]
+    df["reserve_twh"] = reserve_on(df["day"]) if include_reserve else 0.0
+    if include_reserve:
+        df["stock_twh"] = df["agsi_stock_twh"] + df["reserve_twh"]
+        with_reserve = df["stock_twh"] / df["wgv_twh"] * 100
+        df["full_pct"] = with_reserve.where(df["wgv_twh"] > 0, df["agsi_full_pct"])
     return df.set_index("date")
 
 
@@ -164,6 +188,7 @@ def monthly_table(daily):
     out = pd.DataFrame({
         "Gas in storage, month end (TWh)": g["stock_twh"].last(),
         "Fill level, month end (%)": g["full_pct"].last(),
+        "of which security reserve (TWh)": g["reserve_twh"].last(),
         "Injection (TWh)": g["injection_gwh"].sum() / 1000,
         "Withdrawal (TWh)": g["withdrawal_gwh"].sum() / 1000,
         "Working gas volume (TWh)": g["wgv_twh"].last(),
@@ -200,6 +225,10 @@ st.sidebar.header("Settings")
 metric = st.sidebar.radio("Year comparison shows:",
                           ["Fill level (%)", "Gas in storage (TWh)"])
 months_to_show = st.sidebar.slider("Flow chart and table (months):", 3, 24, 12, 1)
+include_reserve = st.sidebar.checkbox(
+    "Include Latvian security reserve", value=True,
+    help="Adds the energy supply security reserve to the stock reported by "
+         "AGSI. Untick to see the AGSI figures as published.")
 if st.sidebar.button("Refresh current year 🔄"):
     fetch_current.clear()
     st.rerun()
@@ -224,7 +253,7 @@ if failed:
         for f in failed:
             st.write(f)
 
-daily = build_daily(rows)
+daily = build_daily(rows, include_reserve)
 valid = daily.dropna(subset=["stock_twh"])
 if valid.empty:
     st.error("No storage data retrieved from AGSI.")
@@ -258,6 +287,16 @@ k[1].metric("Gas in storage", fmt(last["stock_twh"], "{:.1f} TWh"), delta_stock)
 k[2].metric("Working gas volume", fmt(last["wgv_twh"], "{:.1f} TWh"))
 k[3].metric("Injection", fmt(last["injection_gwh"], "{:.1f} GWh/d"))
 k[4].metric("Withdrawal", fmt(last["withdrawal_gwh"], "{:.1f} GWh/d"))
+if include_reserve and last["reserve_twh"] > 0:
+    st.caption(
+        f"Includes the Latvian energy supply security reserve of "
+        f"{last['reserve_twh']:.1f} TWh, which AGSI does not report. "
+        f"AGSI figures without it: {fmt(last['agsi_stock_twh'], '{:.1f} TWh')}, "
+        f"{fmt(last['agsi_full_pct'], '{:.1f} %')}."
+    )
+elif not include_reserve:
+    st.caption("AGSI figures as published: the Latvian energy supply security "
+               "reserve is not included.")
 
 st.markdown("---")
 
@@ -285,6 +324,16 @@ for i, yr in enumerate(years):
         customdata=part.index.strftime("%Y-%m-%d"),
         hovertemplate="%{customdata}: %{y:.1f} " + unit + "<extra>" + str(yr) + "</extra>",
     ))
+if include_reserve and last["reserve_twh"] > 0:
+    # Reference line: the part of the stock that is the security reserve.
+    level = last["reserve_twh"]
+    if col == "full_pct":
+        level = level / last["wgv_twh"] * 100 if last["wgv_twh"] > 0 else None
+    if level is not None and pd.notna(level):
+        fig.add_hline(y=level, line_dash="dot", line_color="#d62728", line_width=1.5,
+                      annotation_text=f"Security reserve ({level:.1f} {unit})",
+                      annotation_position="bottom right",
+                      annotation_font_color="#d62728")
 fig.update_layout(template="plotly_white", height=520, legend_title_text="Year",
                   hovermode="closest", legend=dict(orientation="h", y=1.08, x=0))
 fig.update_xaxes(tickformat="%b", dtick="M1",
@@ -322,6 +371,8 @@ st.plotly_chart(fig_f, use_container_width=True)
 # --- Monthly table and download
 st.subheader("Monthly table")
 table = monthly_table(daily).tail(months_to_show)
+if not include_reserve:
+    table = table.drop(columns=["of which security reserve (TWh)"])
 st.dataframe(table.style.format("{:.1f}", na_rep="n/a"), use_container_width=True)
 latest_month = table.index[-1]
 if last_date.date() < pd.Period(latest_month, freq="M").end_time.date():
@@ -346,9 +397,16 @@ with st.expander("Method and caveats"):
 **Source:** GIE AGSI+ (Aggregated Gas Storage Inventory), facility *UGS Incukalns*
 (`{FACILITY_EIC}`), operator AS Conexus Baltic Grid (`{COMPANY_EIC}`), daily data.
 
-- **Gas in storage:** TWh at the end of the gas day, as reported to AGSI.
+- **Gas in storage:** TWh at the end of the gas day, as reported to AGSI, plus
+  the Latvian energy supply security reserve (see below).
 - **Fill level:** gas in storage divided by the working gas volume (technical
-  capacity), as published by AGSI.
+  capacity) published by AGSI.
+- **Security reserve:** the Latvian energy supply security reserve
+  ({SECURITY_RESERVE[-1][1]:.1f} TWh) is held in Inčukalns but is not part of the
+  stock in AGSI. The app adds it as a fixed amount on every day from
+  {SECURITY_RESERVE[0][0]}; the true amount and start date may differ, and reserves
+  that other countries hold in the storage are not added. Untick "Include Latvian
+  security reserve" in the sidebar to see the AGSI figures as published.
 - **Working gas volume** is set for each storage cycle and changes from year to
   year, so fill levels of different years are not measured against the same capacity.
 - **Injection and withdrawal:** GWh per gas day. The monthly table sums them to TWh.
