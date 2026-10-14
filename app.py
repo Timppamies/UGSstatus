@@ -300,29 +300,45 @@ elif not include_reserve:
 
 st.markdown("---")
 
-# --- Year comparison: one line per year on a January-December axis
+# --- Year comparison: one line per year (gas year April-March for TWh)
 col = "full_pct" if metric.startswith("Fill") else "stock_twh"
 unit = "%" if col == "full_pct" else "TWh"
 st.subheader(f"{metric} by year")
-years = sorted(valid.index.year.unique())
+# Gas in storage (TWh) follows the storage cycle: April-March gas years
+# (injection season first, then withdrawal). Fill level keeps January-December.
+gas_year = col == "stock_twh"
+if gas_year:
+    # A gas year starts on 1 April: January-March belong to the previous one.
+    year_of = pd.Series(valid.index.year - (valid.index.month < 4), index=valid.index)
+else:
+    year_of = pd.Series(valid.index.year, index=valid.index)
+years = sorted(year_of.unique())
 GREYS = ["#c7c7c7", "#a6a6a6", "#858585", "#636363", "#424242"]
 fig = go.Figure()
 for i, yr in enumerate(years):
-    part = valid[valid.index.year == yr].dropna(subset=[col])
+    part = valid[year_of == yr].dropna(subset=[col])
     if part.empty:
         continue
-    # Same dummy leap year for every line, so the x-axis is the day of the year.
-    x = pd.to_datetime("2000-" + part.index.strftime("%m-%d"))
+    if gas_year:
+        # April-December on dummy year 1999, January-March on leap year 2000,
+        # so the x-axis runs from April to March and 29 February fits.
+        dummy = pd.Index(["2000-" if m < 4 else "1999-" for m in part.index.month])
+        x = pd.to_datetime(dummy + part.index.strftime("%m-%d"))
+        name = f"{yr}/{str(yr + 1)[-2:]}"
+    else:
+        # Same dummy leap year for every line, so the x-axis is the day of the year.
+        x = pd.to_datetime("2000-" + part.index.strftime("%m-%d"))
+        name = str(yr)
     is_current = yr == years[-1]
     older = len(years) - 1 - i
     fig.add_trace(go.Scatter(
-        x=x, y=part[col], name=str(yr), mode="lines",
+        x=x, y=part[col], name=name, mode="lines",
         # Current year in blue; earlier years in grey, the most recent darkest.
         line=dict(color="#1f77b4" if is_current
                   else GREYS[max(0, len(GREYS) - older)],
                   width=3.5 if is_current else 1.8),
         customdata=part.index.strftime("%Y-%m-%d"),
-        hovertemplate="%{customdata}: %{y:.1f} " + unit + "<extra>" + str(yr) + "</extra>",
+        hovertemplate="%{customdata}: %{y:.1f} " + unit + "<extra>" + name + "</extra>",
     ))
 if include_reserve and last["reserve_twh"] > 0:
     # Reference line: the part of the stock that is the security reserve.
@@ -334,10 +350,12 @@ if include_reserve and last["reserve_twh"] > 0:
                       annotation_text=f"Security reserve ({level:.1f} {unit})",
                       annotation_position="bottom right",
                       annotation_font_color="#d62728")
-fig.update_layout(template="plotly_white", height=520, legend_title_text="Year",
+fig.update_layout(template="plotly_white", height=520,
+                  legend_title_text="Gas year" if gas_year else "Year",
                   hovermode="closest", legend=dict(orientation="h", y=1.08, x=0))
 fig.update_xaxes(tickformat="%b", dtick="M1",
-                 range=["2000-01-01", "2000-12-31"])
+                 range=["1999-04-01", "2000-03-31"] if gas_year
+                 else ["2000-01-01", "2000-12-31"])
 fig.update_yaxes(title_text=metric, tickformat=".0f", rangemode="tozero")
 if col == "full_pct":
     fig.update_yaxes(range=[0, max(100, math.ceil(valid[col].max() / 10) * 10)])
