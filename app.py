@@ -1,7 +1,7 @@
 """Inčukalns UGS storage level: fill level, gas in storage, injection and withdrawal.
 
 Data: GIE AGSI+ transparency platform (https://agsi.gie.eu), facility level.
-GitHub Actions fetches the data every morning into data/incukalns_daily.csv
+GitHub Actions fetches the data every evening into data/incukalns_daily.csv
 (fetch_data.py), so the app normally reads it from the repository. The app
 calls the API itself only if that file is missing or more than a few days old,
 or when "Fetch latest from AGSI" is pressed; that needs a free AGSI API key in
@@ -169,7 +169,7 @@ if st.sidebar.button("Clear cache"):
     st.cache_data.clear()
     st.rerun()
 st.sidebar.caption(
-    "Data is fetched from AGSI into the repository every morning, so the app "
+    "Data is fetched from AGSI into the repository every evening, so the app "
     "opens without waiting for the API. AGSI publishes each gas day on the "
     "following day."
 )
@@ -365,13 +365,13 @@ with st.expander("Method and caveats"):
   values can still change.
 - These figures come from AGSI, not ENTSOG, so the injection and withdrawal here
   can differ slightly from the flows in the FinBalt demand and supply apps.
-- The full history is re-fetched every morning, so AGSI's revisions to old days
+- The full history is re-fetched every evening, so AGSI's revisions to old days
   show up the next day.
         """
     )
 
 with st.expander("Data quality"):
-    src = (f"Stored file (updated every morning): through {stored_last}."
+    src = (f"Stored file (updated every evening): through {stored_last}."
            if stored_last else "No stored file.")
     if live_from:
         src += f" Fetched live from AGSI: {live_from} onwards."
