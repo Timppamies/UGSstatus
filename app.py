@@ -246,7 +246,14 @@ if gas_year:
 else:
     year_of = pd.Series(valid.index.year, index=valid.index)
 years = sorted(year_of.unique())
-GREYS = ["#c7c7c7", "#a6a6a6", "#858585", "#636363", "#424242"]
+# One fixed colour per year, so a year keeps its colour in both views and when
+# a new year is added (validated for colour-blind separation). Red is left out
+# because the security reserve line is red.
+YEAR_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100",
+               "#e87ba4", "#008300", "#6250d6"]
+LABEL_COLOR = "#444444"
+x_end = pd.Timestamp("2000-03-31" if gas_year else "2000-12-31")
+end_labels = []  # (x, y, name) at the end of each line
 fig = go.Figure()
 for i, yr in enumerate(years):
     part = valid[year_of == yr].dropna(subset=[col])
@@ -263,16 +270,30 @@ for i, yr in enumerate(years):
         x = pd.to_datetime("2000-" + part.index.strftime("%m-%d"))
         name = str(yr)
     is_current = yr == years[-1]
-    older = len(years) - 1 - i
     fig.add_trace(go.Scatter(
         x=x, y=part[col], name=name, mode="lines",
-        # Current year in blue; earlier years in grey, the most recent darkest.
-        line=dict(color="#1f77b4" if is_current
-                  else GREYS[max(0, len(GREYS) - older)],
-                  width=3.5 if is_current else 1.8),
+        # Current year thicker; every year has its own colour.
+        line=dict(color=YEAR_COLORS[(int(yr) - 2021) % len(YEAR_COLORS)],
+                  width=3.5 if is_current else 2),
         customdata=part.index.strftime("%Y-%m-%d"),
         hovertemplate="%{customdata}: %{y:.1f} " + unit + "<extra>" + name + "</extra>",
     ))
+    end_labels.append([x[-1], float(part[col].iloc[-1]), name])
+
+# Year labels at the line ends, so the years can be told apart without the
+# legend. Labels that end at the same place are pushed apart vertically.
+y_span = max(valid[col].max(), 1)
+min_gap = y_span * 0.045
+for group in (
+        [l for l in end_labels if (x_end - l[0]).days <= 7],
+        [l for l in end_labels if (x_end - l[0]).days > 7]):
+    group.sort(key=lambda l: l[1])
+    for a, b in zip(group, group[1:]):
+        if b[1] - a[1] < min_gap and abs((a[0] - b[0]).days) <= 20:
+            b[1] = a[1] + min_gap
+for lx, ly, name in end_labels:
+    fig.add_annotation(x=lx, y=ly, text=name, showarrow=False, xanchor="left",
+                       xshift=6, font=dict(size=11, color=LABEL_COLOR))
 if include_reserve and last["reserve_twh"] > 0:
     # Reference line: the part of the stock that is the security reserve.
     level = last["reserve_twh"]
@@ -289,6 +310,8 @@ fig.update_layout(template="plotly_white", height=520,
 fig.update_xaxes(tickformat="%b", dtick="M1",
                  range=["1999-04-01", "2000-03-31"] if gas_year
                  else ["2000-01-01", "2000-12-31"])
+# Room on the right for the year labels at the line ends.
+fig.update_layout(margin=dict(r=70))
 fig.update_yaxes(title_text=metric, tickformat=".0f", rangemode="tozero")
 if col == "full_pct":
     fig.update_yaxes(range=[0, max(100, math.ceil(valid[col].max() / 10) * 10)])
