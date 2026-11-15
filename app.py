@@ -1,33 +1,33 @@
 """Inčukalns UGS storage level: fill level, gas in storage, injection and withdrawal.
 
 Data: GIE AGSI+ transparency platform (https://agsi.gie.eu), facility level.
-Needs a free AGSI API key in Streamlit secrets:  AGSI_API_KEY = "..."
-Run with:  streamlit run finbalt_ugs_storage.py
+GitHub Actions fetches the data every evening into data/incukalns_daily.csv
+(fetch_data.py), so the app normally reads it from the repository. The app
+calls the API itself only if that file is missing or more than a few days old,
+or when "Fetch latest from AGSI" is pressed; that needs a free AGSI API key in
+Streamlit secrets:  AGSI_API_KEY = "..."
+Run with:  streamlit run app.py
 """
 import math
-import time
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
-import requests
 import streamlit as st
+
+from agsi import COMPANY_EIC, FACILITY_EIC, FIELDS, HISTORY_START_YEAR, fetch_range
 
 st.set_page_config(page_title="Inčukalns UGS Storage", page_icon="🛢️", layout="wide")
 
-URL = "https://agsi.gie.eu/api"
-COUNTRY = "LV"
-COMPANY_EIC = "21X000000001379R"   # AS Conexus Baltic Grid
-FACILITY_EIC = "21W000000000113A"  # UGS Incukalns
-HISTORY_START_YEAR = 2022          # first year shown in the year comparison
-PAGE_SIZE = 300                    # AGSI maximum rows per request
-
-# Cache: closed history years are kept for a month, the current year for 6 hours.
-HISTORY_TTL = 30 * 24 * 3600
-CURRENT_TTL = 6 * 3600
-# A year counts as "history" only this many days after it has ended, so that
-# late-confirmed December data is not locked in for a month.
-YEAR_GRACE_DAYS = 60
+DATA_FILE = Path(__file__).parent / "data" / "incukalns_daily.csv"
+# AGSI publishes a gas day on the following day, so the stored file is normally
+# 1-2 days behind. Older than this, the app tops it up from the API.
+STALE_DAYS = 3
+# A live top-up also re-fetches this many days before the stored end, because
+# AGSI revises recent estimated days.
+TOPUP_OVERLAP_DAYS = 14
+LIVE_TTL = 6 * 3600  # cache for live API calls
 
 # Latvian energy supply security reserve held in Inčukalns. It is not part of
 # the stock that AGSI reports, so the app adds it on top. Each entry is
@@ -36,118 +36,49 @@ SECURITY_RESERVE = [
     ("2022-01-01", 1.8),
 ]
 
-FIELDS = {  # AGSI field -> column
-    "gasInStorage": "stock_twh",        # TWh, end of gas day
-    "full": "full_pct",                 # %
-    "injection": "injection_gwh",       # GWh/d
-    "withdrawal": "withdrawal_gwh",     # GWh/d
-    "workingGasVolume": "wgv_twh",      # TWh, technical capacity
-}
-
-
-# -------------------------------------------------------------- AGSI fetch
-def _num(value):
-    """AGSI sends numbers as strings and '-' for missing values."""
-    try:
-        f = float(value)
-    except (TypeError, ValueError):
-        return None
-    return None if math.isnan(f) else f
-
-
-def _request(params, key):
-    """GET one page with retries. Raises RuntimeError if all attempts fail."""
-    err = "unknown error"
-    for attempt in range(4):
-        wait = 5 * (attempt + 1)
-        try:
-            r = requests.get(URL, params=params, headers={"x-key": key}, timeout=60)
-            if r.status_code == 200:
-                js = r.json()
-                if isinstance(js, dict) and isinstance(js.get("data"), list):
-                    return js
-                msg = js.get("message") or js.get("error") if isinstance(js, dict) else None
-                err = str(msg or "unexpected response (check the API key)")
-                break  # retrying will not help
-            err = f"HTTP {r.status_code}"
-            if r.status_code == 429:
-                wait = 61  # AGSI blocks for 60 s after too many requests
-            elif 400 <= r.status_code < 500:
-                break  # retrying will not help
-        except (requests.RequestException, ValueError) as e:
-            err = type(e).__name__
-        if attempt < 3:
-            time.sleep(wait)
-    raise RuntimeError(err)
-
-
-def _fetch_range(start_str, end_str, key):
-    """Daily facility rows for a gas-day range. Raises on any failed page,
-    so partial results are never cached."""
-    rows, page, last_page = [], 1, 1
-    while page <= last_page:
-        js = _request({
-            "country": COUNTRY,
-            "company": COMPANY_EIC,
-            "facility": FACILITY_EIC,
-            "from": start_str,
-            "to": end_str,
-            "page": page,
-            "size": PAGE_SIZE,
-        }, key)
-        try:
-            last_page = int(js.get("last_page") or 1)
-        except (TypeError, ValueError):
-            last_page = 1
-        for x in js["data"]:
-            day = str(x.get("gasDayStart", ""))[:10]
-            if len(day) != 10:
-                continue
-            row = {"day": day, "status": str(x.get("status") or "")}
-            for src, col in FIELDS.items():
-                row[col] = _num(x.get(src))
-            rows.append(row)
-        page += 1
-    return rows
+# ------------------------------------------------------------- data loading
+@st.cache_data(show_spinner=False)
+def read_stored(_path, mtime):
+    """Rows from the stored CSV; the file's modification time is the cache key,
+    so a new file from GitHub Actions is read again automatically."""
+    df = pd.read_csv(_path, dtype={"day": str, "status": str})
+    df["status"] = df["status"].fillna("")
+    return df.sort_values("day").to_dict("records")
 
 
 # The key argument starts with an underscore so Streamlit does not hash it.
-@st.cache_data(ttl=HISTORY_TTL, show_spinner=False)
-def fetch_history_year(year, _key):
-    """One closed calendar year: cached for a month."""
-    return _fetch_range(f"{year}-01-01", f"{year}-12-31", _key)
+@st.cache_data(ttl=LIVE_TTL, show_spinner=False)
+def fetch_live(start_str, end_str, _key):
+    """Live AGSI call, cached for 6 hours."""
+    return fetch_range(start_str, end_str, _key)
 
 
-@st.cache_data(ttl=CURRENT_TTL, show_spinner=False)
-def fetch_current(start_str, end_str, _key):
-    """Current period: cached for 6 hours."""
-    return _fetch_range(start_str, end_str, _key)
-
-
-def history_split(today):
-    """First day of the 'current' period; everything before it is history."""
-    year = (today - timedelta(days=YEAR_GRACE_DAYS)).year
-    return date(max(year, HISTORY_START_YEAR), 1, 1)
-
-
-def load_storage(split, today, key):
-    rows, failed = [], []
-    years = list(range(HISTORY_START_YEAR, split.year))
-    steps = len(years) + 1
-    bar = st.progress(0.0, text="Loading AGSI data...")
-    for i, year in enumerate(years):
-        bar.progress(i / steps, text=f"Loading {year} ({i + 1}/{steps})")
+def load_storage(today, key, force_live=False):
+    """Stored rows, topped up from the API when needed.
+    Returns (rows, failed, stored_last_day, live_from)."""
+    rows, failed, stored_last, live_from = [], [], None, None
+    if DATA_FILE.exists():
         try:
-            rows += fetch_history_year(year, key)
+            rows = read_stored(DATA_FILE, DATA_FILE.stat().st_mtime)
         except Exception as e:
-            failed.append(f"{year}: {e}")
-    bar.progress(len(years) / steps, text=f"Loading current year ({steps}/{steps})")
-    try:
-        rows += fetch_current(split.isoformat(), today.isoformat(), key)
-    except Exception as e:
-        failed.append(f"{split} onwards: {e}")
-    bar.empty()
-    return rows, failed
+            failed.append(f"Stored file: {e}")
+        if rows:
+            stored_last = date.fromisoformat(rows[-1]["day"])
+    stale = stored_last is None or (today - stored_last).days > STALE_DAYS
+    if (stale or force_live) and key:
+        live_from = (date(HISTORY_START_YEAR, 1, 1) if stored_last is None
+                     else stored_last - timedelta(days=TOPUP_OVERLAP_DAYS))
+        with st.spinner("Loading latest data from AGSI..."):
+            try:
+                # Live rows come last, so they replace stored rows of the same day.
+                rows = rows + fetch_live(live_from.isoformat(), today.isoformat(), key)
+            except Exception as e:
+                failed.append(f"AGSI API from {live_from}: {e}")
+                live_from = None
+    elif stale:
+        failed.append("The stored data is out of date and no AGSI API key is set, "
+                      "so newer days cannot be fetched.")
+    return rows, failed, stored_last, live_from
 
 
 def reserve_on(days):
@@ -209,8 +140,8 @@ try:
     api_key = str(st.secrets.get("AGSI_API_KEY", "")).strip()
 except Exception:
     api_key = ""
-if not api_key:
-    st.error("AGSI API key is missing.")
+if not api_key and not DATA_FILE.exists():
+    st.error("No stored data yet and the AGSI API key is missing.")
     st.markdown(
         "Add your key to the app's secrets and reload:\n\n"
         "```toml\nAGSI_API_KEY = \"your-key-here\"\n```\n\n"
@@ -229,25 +160,27 @@ include_reserve = st.sidebar.checkbox(
     "Include Latvian security reserve", value=True,
     help="Adds the energy supply security reserve to the stock reported by "
          "AGSI. Untick to see the AGSI figures as published.")
-if st.sidebar.button("Refresh current year 🔄"):
-    fetch_current.clear()
-    st.rerun()
-if st.sidebar.button("Clear all cache (incl. history)"):
+if api_key and st.sidebar.button("Fetch latest from AGSI 🔄"):
+    fetch_live.clear()
+    # Kept for the session, so the live data stays when other settings change.
+    st.session_state["force_live"] = True
+force_live = st.session_state.get("force_live", False)
+if st.sidebar.button("Clear cache"):
     st.cache_data.clear()
     st.rerun()
 st.sidebar.caption(
-    "History years are cached for 30 days, the current year for 6 hours. "
-    "AGSI publishes new data once a day."
+    "Data is fetched from AGSI into the repository every evening, so the app "
+    "opens without waiting for the API. AGSI publishes each gas day on the "
+    "following day."
 )
 
 today = date.today()
-split = history_split(today)
-rows, failed = load_storage(split, today, api_key)
+rows, failed, stored_last, live_from = load_storage(today, api_key, force_live)
 
 if failed:
     st.warning(
         "Some AGSI data could not be loaded, so the figures below may be "
-        "incomplete. Press the refresh button to retry (the rest is cached)."
+        "incomplete or out of date."
     )
     with st.expander("Failed requests"):
         for f in failed:
@@ -432,14 +365,17 @@ with st.expander("Method and caveats"):
   values can still change.
 - These figures come from AGSI, not ENTSOG, so the injection and withdrawal here
   can differ slightly from the flows in the FinBalt demand and supply apps.
-- History years are cached for 30 days, so a revision to old data shows up only
-  after that (or after "Clear all cache").
+- The full history is re-fetched every evening, so AGSI's revisions to old days
+  show up the next day.
         """
     )
 
 with st.expander("Data quality"):
-    st.write(f"Cached as history (30 days): before {split}. "
-             f"Current (6 hours): {split} onwards.")
+    src = (f"Stored file (updated every evening): through {stored_last}."
+           if stored_last else "No stored file.")
+    if live_from:
+        src += f" Fetched live from AGSI: {live_from} onwards."
+    st.write(src)
     q = daily.assign(Year=daily.index.year)
     names = {"C": "Confirmed", "E": "Estimated", "N": "No data"}
     quality = (q.assign(Status=q["status"].map(names).fillna("Other"))

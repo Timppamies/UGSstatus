@@ -1,0 +1,46 @@
+name: Update AGSI data
+
+on:
+  schedule:
+    # Every evening at 19:13 UTC (21:13 Finnish winter time, 22:13 summer time),
+    # after AGSI has published the previous gas day (18:30 UTC in winter).
+    - cron: "13 19 * * *"
+  workflow_dispatch: {}  # "Run workflow" button on the Actions tab
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pandas requests
+
+      - name: Fetch AGSI data
+        env:
+          AGSI_API_KEY: ${{ secrets.AGSI_API_KEY }}
+        run: python fetch_data.py
+
+      - name: Commit if the data changed
+        run: |
+          git add data/
+          if git diff --cached --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update AGSI data $(date -u +%F)"
+          git push
