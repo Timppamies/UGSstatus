@@ -23,7 +23,8 @@ APPS = [
 
 WAKE_BUTTON = "button:has-text('get this app back up')"  # on the sleep page
 APP_READY = "[data-testid='stApp'], [data-testid='stAppViewContainer']"
-LOAD_TIMEOUT_S = 180  # a sleeping app can take a couple of minutes to start
+LOAD_TIMEOUT_S = 300  # a sleeping app can take several minutes to start
+ATTEMPTS = 2  # a slow wake-up gets one more try with a fresh page load
 
 
 def app_ready(page):
@@ -63,12 +64,18 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch()
         for url in urls:
-            page = browser.new_page()
-            try:
-                ok, note = visit(page, url)
-            except Exception as e:
-                ok, note = False, f"error: {type(e).__name__}: {e}"
-            page.close()
+            for attempt in range(1, ATTEMPTS + 1):
+                page = browser.new_page()
+                try:
+                    ok, note = visit(page, url)
+                except Exception as e:
+                    ok, note = False, f"error: {type(e).__name__}: {e}"
+                page.close()
+                if attempt > 1:
+                    note += f" (attempt {attempt})"
+                if ok or attempt == ATTEMPTS:
+                    break
+                print(f"RETRY {url}: {note}", flush=True)
             print(f"{'OK  ' if ok else 'FAIL'} {url}: {note}", flush=True)
             if not ok:
                 failed.append(url)

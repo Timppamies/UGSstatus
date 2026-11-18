@@ -2,22 +2,27 @@ name: Keep Streamlit apps awake
 
 on:
   schedule:
-    # Every 6 hours; Streamlit Community Cloud puts apps to sleep after about
-    # 12 hours without visitors.
-    - cron: "7 */6 * * *"
+    # Every hour. Streamlit Community Cloud puts apps to sleep after about
+    # 12 hours without visitors, and GitHub often delays or skips scheduled
+    # runs (a 6-hour schedule ran only about twice a day), so run often.
+    - cron: "17 * * * *"
   workflow_dispatch: {}  # "Run workflow" button on the Actions tab
 
 permissions:
   contents: read
 
+concurrency:  # never two visits at the same time
+  group: keep-awake
+  cancel-in-progress: false
+
 jobs:
   visit:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
