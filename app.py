@@ -330,17 +330,43 @@ if col == "full_pct" and not wgv.empty and wgv.max() - wgv.min() > 0.05:
 st.subheader("Daily injection and withdrawal (GWh/d)")
 flow_start = (last_date.to_period("M") - (months_to_show - 1)).start_time
 flows = daily[daily.index >= flow_start]
+# Days AGSI still marks as estimated (status E) are drawn faded and hatched:
+# they are often placeholder values that are replaced once confirmed.
+estimated = (flows["status"] == "E").to_numpy()
+est_opacity = [0.35 if e else 1.0 for e in estimated]
+est_pattern = dict(shape=["/" if e else "" for e in estimated], size=6, solidity=0.3)
+est_note = [" (estimated)" if e else "" for e in estimated]
 fig_f = go.Figure()
 fig_f.add_trace(go.Bar(x=flows.index, y=flows["injection_gwh"], name="Injection",
-                       marker_color="#2ca02c", hovertemplate="%{y:.1f} GWh/d"))
+                       marker=dict(color="#2ca02c", opacity=est_opacity,
+                                   pattern=est_pattern),
+                       customdata=est_note,
+                       hovertemplate="%{y:.1f} GWh/d%{customdata}"))
 fig_f.add_trace(go.Bar(x=flows.index, y=-flows["withdrawal_gwh"], name="Withdrawal",
-                       marker_color="#d62728", customdata=flows["withdrawal_gwh"],
-                       hovertemplate="%{customdata:.1f} GWh/d"))
+                       marker=dict(color="#d62728", opacity=est_opacity,
+                                   pattern=est_pattern),
+                       customdata=list(zip(flows["withdrawal_gwh"], est_note)),
+                       hovertemplate="%{customdata[0]:.1f} GWh/d%{customdata[1]}"))
+if estimated.any():
+    # Legend entry only, explaining the faded bars.
+    fig_f.add_trace(go.Bar(x=[None], y=[None], name="Estimated by AGSI (not confirmed)",
+                           marker=dict(color="#999999", opacity=0.35,
+                                       pattern=dict(shape="/", size=6, solidity=0.3)),
+                           hoverinfo="skip"))
 fig_f.update_layout(barmode="relative", bargap=0, template="plotly_white", height=420,
                     hovermode="x unified", legend_title_text="",
                     legend=dict(orientation="h", y=1.1, x=0))
 fig_f.update_yaxes(title_text="GWh/d (withdrawal shown below zero)", tickformat=".0f")
 st.plotly_chart(fig_f, use_container_width=True)
+if estimated.any():
+    est_days = flows.index[estimated]
+    st.caption(
+        f"Faded, hatched bars: {len(est_days)} day(s) that AGSI still marks as "
+        f"estimated (latest {est_days[-1].date()}). Estimates are often placeholder "
+        "values (for example the previous day repeated, or the same injection and "
+        "withdrawal every day) and are replaced when the operator confirms the "
+        "figures; the app picks up the confirmed values in the evening fetch."
+    )
 
 # --- Monthly table and download
 st.subheader("Monthly table")
